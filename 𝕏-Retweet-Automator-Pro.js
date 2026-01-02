@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         𝕏-Retweet-Automator-Pro
 // @namespace    https://dhiya000.netlify.app/
-// @version      1.1
+// @version      1.2
 // @author       @dhiya_000
 // @match        https://x.com/home
 // @match        https://x.com/explore
@@ -22,56 +22,80 @@
         minDelay: getSet('rt_minDelay', 5),
         maxDelay: getSet('rt_maxDelay', 15),
         maxPosts: getSet('rt_maxPosts', 10),
-        breakMin: getSet('rt_breakMin', 30), // Session break in minutes
+        breakMin: getSet('rt_breakMin', 30),
         exclude: getSet('rt_exclude', ['ads', 'promoted']),
-        include: getSet('rt_include', []), // If not empty, only these will be retweeted
+        include: getSet('rt_include', []),
     };
 
     let state = {
         running: false,
         count: getSet('rt_state_count', 0),
         cooldownEnd: getSet('rt_state_cooldown', 0),
-        processed: new Set()
+        processed: new Set(),
+        uiVisible: true
     };
 
-    // --- UI Construction ---
+    // --- UI Elements ---
     const ui = document.createElement('div');
-    ui.style.cssText = 'position:fixed;top:10px;right:10px;z-index:9999;background:#fff;padding:15px;border:2px solid #1DA1F2;border-radius:12px;font-family:sans-serif;width:280px;box-shadow:0 10px 25px rgba(0,0,0,0.2);color:#000;';
+    const togglePill = document.createElement('div');
+
+    // Style for the Toggle Pill (The small live button)
+    togglePill.style.cssText = `
+        position:fixed; top:10px; right:10px; z-index:10000;
+        background:#1DA1F2; color:#fff; padding:8px 15px;
+        border-radius:20px; font-family:sans-serif; font-size:12px;
+        font-weight:bold; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.15);
+        display:flex; align-items:center; gap:8px; transition: all 0.2s;
+        user-select: none; border: 2px solid #fff;
+    `;
+    
+    // Style for the Main Settings Box
+    ui.style.cssText = `
+        position:fixed; top:55px; right:10px; z-index:9999;
+        background:#fff; padding:15px; border:2px solid #1DA1F2;
+        border-radius:12px; font-family:sans-serif; width:280px;
+        box-shadow:0 10px 25px rgba(0,0,0,0.2); color:#000;
+        display: block;
+    `;
+
+    document.body.appendChild(togglePill);
     document.body.appendChild(ui);
 
     const renderUI = () => {
         ui.innerHTML = `
-            <div style="font-weight:bold;margin-bottom:10px;display:flex;justify-content:space-between;">
-                <span>𝕏 Retweet Bot</span>
-                <span id="bot-status" style="color:${state.cooldownEnd > Date.now() ? 'orange' : (state.running ? 'green' : 'red')}">
+            <div style="font-weight:bold;margin-bottom:10px;display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding-bottom:5px;">
+                <span>𝕏 Bot Settings</span>
+                <span id="bot-status-label" style="color:${state.cooldownEnd > Date.now() ? 'orange' : (state.running ? 'green' : 'red')}">
                     ${state.cooldownEnd > Date.now() ? 'Cooldown' : (state.running ? 'Running' : 'Stopped')}
                 </span>
             </div>
-            <div id="timer-display" style="font-size:12px;margin-bottom:10px;background:#f0f8ff;padding:5px;border-radius:5px;text-align:center;">
-                Progress: ${state.count} / ${cfg.maxPosts}
+            <div id="timer-display" style="font-size:12px;margin-bottom:10px;background:#f0f8ff;padding:5px;border-radius:5px;text-align:center;font-weight:bold;">
+                Ready
             </div>
             
             <div style="display:flex;flex-direction:column;gap:5px;font-size:11px;">
                 <label>Delay (Min-Max sec):</label>
                 <div style="display:flex;gap:5px;">
-                    <input type="number" id="cfg-min" value="${cfg.minDelay}" style="width:50%;">
-                    <input type="number" id="cfg-max" value="${cfg.maxDelay}" style="width:50%;">
+                    <input type="number" id="cfg-min" value="${cfg.minDelay}" style="width:50%;padding:3px;border:1px solid #ccc;border-radius:4px;">
+                    <input type="number" id="cfg-max" value="${cfg.maxDelay}" style="width:50%;padding:3px;border:1px solid #ccc;border-radius:4px;">
                 </div>
                 <label>Max Posts per Session:</label>
-                <input type="number" id="cfg-limit" value="${cfg.maxPosts}">
+                <input type="number" id="cfg-limit" value="${cfg.maxPosts}" style="padding:3px;border:1px solid #ccc;border-radius:4px;">
                 <label>Session Break (Minutes):</label>
-                <input type="number" id="cfg-break" value="${cfg.breakMin}">
+                <input type="number" id="cfg-break" value="${cfg.breakMin}" style="padding:3px;border:1px solid #ccc;border-radius:4px;">
                 
-                <button id="start-btn" style="margin-top:10px;padding:8px;background:#1DA1F2;color:#fff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;">
+                <button id="start-btn" style="margin-top:10px;padding:10px;background:${state.running ? '#ff4b4b' : '#1DA1F2'};color:#fff;border:none;border-radius:5px;cursor:pointer;font-weight:bold;text-transform:uppercase;">
                     ${state.running ? 'STOP BOT' : 'START BOT'}
                 </button>
+                <div style="font-size:9px; color:#777; margin-top:5px; text-align:center;">Click the top blue pill to hide this menu</div>
             </div>
         `;
 
         document.getElementById('start-btn').onclick = toggleBot;
-        // Auto-save settings on change
+        
+        // Settings auto-save
         ui.querySelectorAll('input').forEach(input => {
-            input.onchange = (e) => {
+            input.onchange = () => {
                 cfg.minDelay = parseInt(document.getElementById('cfg-min').value);
                 cfg.maxDelay = parseInt(document.getElementById('cfg-max').value);
                 cfg.maxPosts = parseInt(document.getElementById('cfg-limit').value);
@@ -84,15 +108,36 @@
         });
     };
 
+    // --- Update Logic for Both UI and Toggle Pill ---
     const updateStatus = (msg) => {
         const timerDisp = document.getElementById('timer-display');
+        const statusLabel = document.getElementById('bot-status-label');
+        
+        // Update the Floating Pill (Live Countdown)
+        togglePill.innerHTML = `<span>🤖</span> <span>${msg}</span>`;
+        
+        // Update Main Panel if open
         if (timerDisp) timerDisp.innerText = msg;
+        if (statusLabel) {
+            statusLabel.innerText = state.cooldownEnd > Date.now() ? 'Cooldown' : (state.running ? 'Running' : 'Stopped');
+            statusLabel.style.color = state.cooldownEnd > Date.now() ? 'orange' : (state.running ? 'green' : 'red');
+        }
+    };
+
+    // Toggle Main Settings Visibility
+    togglePill.onclick = () => {
+        state.uiVisible = !state.uiVisible;
+        ui.style.display = state.uiVisible ? 'block' : 'none';
+        togglePill.style.background = state.uiVisible ? '#1DA1F2' : '#000';
     };
 
     // --- Bot Logic ---
     async function toggleBot() {
         state.running = !state.running;
-        if (!state.running) state.cooldownEnd = 0; // Reset cooldown if manually stopped
+        if (!state.running) {
+            state.cooldownEnd = 0;
+            updateStatus("Bot Stopped");
+        }
         renderUI();
         if (state.running) runLoop();
     }
@@ -104,33 +149,32 @@
 
     async function runLoop() {
         while (state.running) {
-            // 1. Check if we are in a session break
+            // 1. Session Break logic
             if (state.cooldownEnd > Date.now()) {
                 const remaining = Math.ceil((state.cooldownEnd - Date.now()) / 1000);
                 const mins = Math.floor(remaining / 60);
                 const secs = remaining % 60;
-                updateStatus(`Cooldown: ${mins}m ${secs}s left`);
+                updateStatus(`Break: ${mins}m ${secs}s`);
                 await new Promise(r => setTimeout(r, 1000));
                 continue;
             }
 
-            // 2. Check if we just finished a session break
+            // 2. Reset session if cooldown finished
             if (state.cooldownEnd !== 0 && state.cooldownEnd <= Date.now()) {
                 state.cooldownEnd = 0;
                 state.count = 0;
                 localStorage.setItem('rt_state_count', 0);
                 localStorage.setItem('rt_state_cooldown', 0);
-                updateStatus("Session Restoring...");
             }
 
-            // 3. Check for session limit
+            // 3. Limit check
             if (state.count >= cfg.maxPosts) {
                 state.cooldownEnd = Date.now() + (cfg.breakMin * 60 * 1000);
                 localStorage.setItem('rt_state_cooldown', state.cooldownEnd);
                 continue;
             }
 
-            // 4. Find Tweets
+            // 4. Action logic
             const tweets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
             let actionTaken = false;
 
@@ -141,35 +185,27 @@
                 if (state.processed.has(tweetId)) continue;
                 state.processed.add(tweetId);
 
-                // Exclusion / Inclusion Logic
                 if (cfg.exclude.includes(author)) continue;
                 if (cfg.include.length > 0 && !cfg.include.includes(author)) continue;
 
-                // Color: Yellow (Processing)
-                tweet.style.backgroundColor = 'rgba(255, 255, 0, 0.1)';
-                
-                // Skip if already retweeted
-                if (tweet.querySelector('[data-testid="unretweet"]')) {
-                    tweet.style.backgroundColor = 'rgba(0, 150, 255, 0.1)'; // Blue for skip
-                    continue;
-                }
+                if (tweet.querySelector('[data-testid="unretweet"]')) continue;
 
                 const rtBtn = tweet.querySelector('[data-testid="retweet"]');
                 if (rtBtn) {
                     rtBtn.click();
-                    await new Promise(r => setTimeout(r, 1200));
+                    await new Promise(r => setTimeout(r, 800));
                     const confirm = document.querySelector('[data-testid="retweetConfirm"]');
                     if (confirm) {
                         confirm.click();
                         state.count++;
                         localStorage.setItem('rt_state_count', state.count);
-                        tweet.style.backgroundColor = 'rgba(0, 255, 0, 0.1)'; // Green for success
+                        tweet.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
                         
                         const waitTime = Math.floor(Math.random() * (cfg.maxDelay - cfg.minDelay + 1) + cfg.minDelay);
                         for(let i = waitTime; i > 0; i--) {
-                            updateStatus(`Waiting ${i}s... | Total: ${state.count}`);
-                            await new Promise(r => setTimeout(r, 1000));
                             if (!state.running) return;
+                            updateStatus(`Wait: ${i}s | Done: ${state.count}`);
+                            await new Promise(r => setTimeout(r, 1000));
                         }
                         actionTaken = true;
                         break; 
@@ -178,23 +214,23 @@
             }
 
             if (!actionTaken) {
-                window.scrollBy(0, 500);
+                updateStatus(`Scanning... (${state.count}/${cfg.maxPosts})`);
+                window.scrollBy(0, 400);
                 await new Promise(r => setTimeout(r, 2000));
             }
         }
     }
 
-    // Initialize UI
+    // Init
     renderUI();
+    updateStatus(state.running ? "Resuming..." : "Bot Paused");
 
-    // Auto-start logic if coming back from refresh during a run
     if (getSet('rt_state_running', false)) {
         state.running = true;
         renderUI();
         runLoop();
     }
 
-    // Save running state before unload
     window.onbeforeunload = () => {
         localStorage.setItem('rt_state_running', state.running);
     };
