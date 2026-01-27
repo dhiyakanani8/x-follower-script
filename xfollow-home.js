@@ -1,80 +1,262 @@
 // ==UserScript==
-// @name         𝕏-Follow-Automator-Pro-V4
+// @name         𝕏-Follow-Automator-Pro-V2.0
 // @namespace    https://dhiya000.netlify.app/
-// @version      4.0.0
+// @version      2.0.0
+// @description  Automated bot with continuous list scanning, Follow-Limit, Ratio Labels, and Min-Follower filter.
 // @author       @dhiya_000
 // @match        https://x.com/home
 // @match        https://x.com/explore
 // @match        https://x.com/*/status/*
+// @match        https://x.com/*/verified_followers
+// @match        https://x.com/*/followers
+// @match        https://x.com/*
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // --- Persistent Config & State ---
+    /**
+     * --- PERSISTENT CONFIGURATION ---
+     */
     const getSet = (k, def) => {
         const val = localStorage.getItem(k);
-        return val ? JSON.parse(val) : def;
+        if (!val) return def;
+        try {
+            return JSON.parse(val);
+        } catch (e) {
+            return val;
+        }
     };
 
     const config = {
         paused: true,
         pLimit: getSet('xf_pLimit', 2),
         hLimit: getSet('xf_hLimit', 50),
+        minRatio: getSet('xf_minRatio', 0.8),
         minDelay: getSet('xf_minDelay', 5),
         maxDelay: getSet('xf_maxDelay', 15),
         followProfileOwner: getSet('xf_followOwner', false),
+        skipList: getSet('xf_skipList', "elonmusk, grok, x, twitter"),
+        breakFollowLimit: getSet('xf_breakLimit', 15),
+        breakDuration: getSet('xf_breakDuration', 5),
+        // NEW CONFIGS
+        useMinFollowers: getSet('xf_useMinFers', false),
+        minFollowers: getSet('xf_minFollowers', 100),
         uiVisible: true
     };
 
+    /**
+     * --- INTERNAL STATE ---
+     */
     let state = {
         busy: false,
         tweetIndex: 0,
         lastHandle: null,
         tabId: Date.now() + '-' + Math.random(),
         hCount: 0,
-        cooldownUntil: getSet('xf_cooldown', 0) // Persist rate limit cooldown
+        sessionFollowCount: 0,
+        processedInCycle: 0,
+        cooldownUntil: getSet('xf_cooldown', 0),
+        breakUntil: 0
     };
 
-    function log(msg) { console.log(`[𝕏-Bot] ${msg}`); }
+    const log = (msg) => console.log(`[𝕏-Bot] ${msg}`);
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
     const save = () => {
-        localStorage.setItem('xf_pLimit', config.pLimit);
-        localStorage.setItem('xf_hLimit', config.hLimit);
-        localStorage.setItem('xf_minDelay', config.minDelay);
-        localStorage.setItem('xf_maxDelay', config.maxDelay);
-        localStorage.setItem('xf_followOwner', config.followProfileOwner);
-        localStorage.setItem('xf_cooldown', state.cooldownUntil);
+        localStorage.setItem('xf_pLimit', JSON.stringify(config.pLimit));
+        localStorage.setItem('xf_hLimit', JSON.stringify(config.hLimit));
+        localStorage.setItem('xf_minRatio', JSON.stringify(config.minRatio));
+        localStorage.setItem('xf_minDelay', JSON.stringify(config.minDelay));
+        localStorage.setItem('xf_maxDelay', JSON.stringify(config.maxDelay));
+        localStorage.setItem('xf_followOwner', JSON.stringify(config.followProfileOwner));
+        localStorage.setItem('xf_skipList', JSON.stringify(config.skipList));
+        localStorage.setItem('xf_cooldown', JSON.stringify(state.cooldownUntil));
+        localStorage.setItem('xf_breakLimit', JSON.stringify(config.breakFollowLimit));
+        localStorage.setItem('xf_breakDuration', JSON.stringify(config.breakDuration));
+        localStorage.setItem('xf_useMinFers', JSON.stringify(config.useMinFollowers));
+        localStorage.setItem('xf_minFollowers', JSON.stringify(config.minFollowers));
     };
 
-    // --- UI ELEMENTS ---
+    /**
+     * --- UTILS ---
+     */
+    const parseTwitterNumber = (text) => {
+        if (!text) return 0;
+        const cleanText = text.replace(/,/g, '').split(' ')[0].trim().toUpperCase();
+        const num = parseFloat(cleanText);
+        if (cleanText.includes('K')) return num * 1000;
+        if (cleanText.includes('M')) return num * 1000000;
+        if (cleanText.includes('B')) return num * 1000000000;
+        return num || 0;
+    };
+
+    // Formatter for display (e.g., 1500 -> 1.5K)
+    const formatTwitterNumber = (num) => {
+        if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+        return num.toString();
+    };
+
+    const isAd = (tweet) => {
+        const spans = Array.from(tweet.querySelectorAll('span'));
+        return spans.some(s => s.textContent === 'Promoted' || s.textContent === 'Ad') || !!tweet.querySelector('[data-testid="placementTracking"]');
+    };
+
+    const shouldSkipHandle = (handle) => {
+        if (!handle) return false;
+        const list = config.skipList.split(',').map(i => i.trim().toLowerCase());
+        return list.includes(handle.toLowerCase().replace('@', ''));
+    };
+
+    const highlightElement = (el) => {
+        document.querySelectorAll('.bot-active-cell').forEach(c => {
+            c.style.outline = 'none';
+            c.classList.remove('bot-active-cell');
+        });
+        if (el) {
+            el.classList.add('bot-active-cell');
+            el.style.outline = '3px solid #1DA1F2';
+            el.style.outlineOffset = '-3px';
+        }
+    };
+
+    const goBack = async () => {
+        const btn = document.querySelector('button[data-testid="app-bar-back"]');
+        if (btn) {
+            btn.click();
+            log("Navigating back...");
+            await delay(2000);
+            return true;
+        }
+        return false;
+    };
+
+    const checkNewPostsBanner = async () => {
+        const banner = Array.from(document.querySelectorAll('div[role="button"]'))
+            .find(el => {
+                const txt = el.textContent.toLowerCase();
+                return (txt.includes('new posts') || txt.includes('show')) && el.offsetHeight > 0;
+            });
+
+        if (banner) {
+            log("New posts found! Refreshing timeline...");
+            banner.click();
+            await delay(2500);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            state.tweetIndex = 0;
+            return true;
+        }
+        return false;
+    };
+
+    const refreshHome = async () => {
+        log("Forcing Home Refresh...");
+        const logo = document.querySelector('a[aria-label="X"], a[href="/home"]');
+        if (logo) {
+            logo.click();
+            await delay(3000);
+            window.scrollTo(0, 0);
+        } else {
+            window.location.href = "https://x.com/home";
+        }
+    };
+
+    async function checkRateLimit() {
+        await delay(1200);
+        const toast = document.querySelector('[data-testid="toast"]');
+        if (toast) {
+            const text = toast.textContent.toLowerCase();
+            if (text.includes('rate limited') || text.includes('unable to follow')) {
+                log('Limit detected! Pausing for 1 hour.');
+                state.cooldownUntil = Date.now() + (60 * 60 * 1000);
+                save();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    const getStatsFromHoverCard = async (userElement) => {
+        userElement.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        let attempts = 0, hoverCard = null;
+        while (attempts < 25) {
+            hoverCard = document.querySelector('[data-testid="hoverCardParent"]');
+            if (hoverCard) break;
+            await delay(200);
+            attempts++;
+        }
+        if (!hoverCard) return null;
+
+        const links = Array.from(hoverCard.querySelectorAll('a[role="link"]'));
+        let followers = 0, following = 0;
+        links.forEach(l => {
+            const txt = l.innerText.toLowerCase();
+            const valSpan = l.querySelector('span');
+            const val = parseTwitterNumber(valSpan ? valSpan.innerText : "0");
+            if (txt.includes('follower')) followers = val;
+            if (txt.includes('following')) following = val;
+        });
+
+        userElement.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+        return { ratio: following / (followers || 1), followers, following };
+    };
+
+    const injectStatsLabel = (btn, stats) => {
+        if (!btn || !stats) return;
+        const parent = btn.parentElement;
+        let label = parent.querySelector('.bot-ratio-ui');
+        if (!label) {
+            label = document.createElement('div');
+            label.className = 'bot-ratio-ui';
+            label.style.cssText = 'font-size:10px; font-weight:bold; margin-top:4px; text-align:center; display:block; width:100%; line-height:1.2; background: rgba(0,0,0,0.05); padding: 4px; border-radius: 4px;';
+            parent.appendChild(label);
+        }
+
+        const ratioPass = stats.ratio >= config.minRatio;
+        const followersPass = !config.useMinFollowers || stats.followers >= config.minFollowers;
+
+        const badgeStyle = (pass, color) => `
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            margin: 2px;
+            font-weight: 700;
+            background: ${pass ? color + '15' : '#fee2e2'};
+            color: ${pass ? color : '#dc2626'};
+            border: 1px solid ${pass ? color + '30' : '#fecaca'};
+        `;
+
+        label.innerHTML = `
+            <div style="${badgeStyle(ratioPass, '#00ba7c')}">
+                <span>RATIO</span> <span>${stats.ratio.toFixed(2)}</span>
+            </div>
+            <div style="${badgeStyle(followersPass, '#1d9bf0')}">
+                <span>Followers</span> <span>${formatTwitterNumber(stats.followers)}</span>
+            </div>
+            <div style="${badgeStyle(followersPass, '#536471')}">
+                <span>FOLLOWING</span> <span>${formatTwitterNumber(stats.following)}</span>
+            </div>
+        `;
+
+    };
+
+    /**
+     * --- UI ---
+     */
     const pill = document.createElement('div');
     const panel = document.createElement('div');
 
     const setupUI = () => {
-        pill.style.cssText = `
-            position:fixed; top:10px; right:10px; z-index:10001;
-            background:#1DA1F2; color:#fff; padding:8px 15px;
-            border-radius:20px; font-family:sans-serif; font-size:12px;
-            font-weight:bold; cursor:pointer; box-shadow:0 4px 12px rgba(0,0,0,0.2);
-            display:flex; align-items:center; gap:8px; border:2px solid #fff;
-            user-select:none; transition: all 0.2s;
-        `;
-        pill.innerHTML = `<span>🤖</span> <span id="pill-status">Bot Paused</span>`;
-        pill.onclick = () => {
-            config.uiVisible = !config.uiVisible;
-            panel.style.display = config.uiVisible ? 'block' : 'none';
-        };
+        pill.style.cssText = `position:fixed; top:10px; right:10px; z-index:10001; background:#000; color:#fff; padding:8px 16px; border-radius:30px; font-family:sans-serif; font-size:12px; font-weight:bold; cursor:pointer; box-shadow:0 4px 15px rgba(0,0,0,0.3); border:1px solid #333; display:flex; align-items:center; gap:8px;`;
+        pill.innerHTML = `<span style="color:#1DA1F2; font-size:16px;">⚡</span> <span id="pill-status">Bot Paused</span>`;
+        pill.onclick = () => { config.uiVisible = !config.uiVisible; panel.style.display = config.uiVisible ? 'block' : 'none'; };
 
-        panel.style.cssText = `
-            position:fixed; top:55px; right:10px; z-index:10000;
-            background:#fff; padding:15px; border:1px solid #1DA1F2;
-            border-radius:12px; font-family:sans-serif; width:260px;
-            box-shadow:0 10px 25px rgba(0,0,0,0.1); color:#000;
-            display: ${config.uiVisible ? 'block' : 'none'};
-        `;
-
+        panel.style.cssText = `position:fixed; top:60px; right:10px; z-index:10000; background:#fff; padding:18px; border:1px solid #eff3f4; border-radius:16px; font-family:sans-serif; width:300px; color:#000; display: ${config.uiVisible ? 'block' : 'none'}; box-shadow:0 15px 35px rgba(0,0,0,0.15); overflow-y:auto; max-height:80vh;`;
         renderPanel();
         document.body.appendChild(pill);
         document.body.appendChild(panel);
@@ -82,35 +264,101 @@
 
     const renderPanel = () => {
         panel.innerHTML = `
-            <div style="font-weight:bold; margin-bottom:12px; border-bottom:1px solid #eee; padding-bottom:5px; display:flex; justify-content:space-between;">
-                <span>Settings</span>
-                <span id="panel-status-label" style="color:${config.paused ? 'red' : 'green'}">${config.paused ? 'Stopped' : 'Running'}</span>
+            <!-- Header -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #eff3f4;">
+                <span style="font-weight: 800; font-size: 16px; color: #0f1419;">Settings</span>
+                <span style="font-size: 10px; background: #0f1419; color: #fff; padding: 2px 8px; border-radius: 12px; font-weight: 700;">PRO V2.0.1</span>
             </div>
-            <div style="display:flex; flex-direction:column; gap:8px; font-size:11px;">
-                <label>Profile Limit: <input type="number" id="inp-pLimit" value="${config.pLimit}" style="width:50px;float:right;"></label>
-                <label>Hourly Limit: <input type="number" id="inp-hLimit" value="${config.hLimit}" style="width:50px;float:right;"></label>
-                <label>Min Delay (s): <input type="number" id="inp-minD" value="${config.minDelay}" style="width:50px;float:right;"></label>
-                <label>Max Delay (s): <input type="number" id="inp-maxD" value="${config.maxDelay}" style="width:50px;float:right;"></label>
-                <label><input type="checkbox" id="inp-owner" ${config.followProfileOwner ? 'checked' : ''}> Follow Profile Owner</label>
-                <button id="main-toggle-btn" style="margin-top:10px; padding:10px; background:${config.paused ? '#1DA1F2' : '#ff4b4b'}; color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold;">
-                    ${config.paused ? 'START BOT' : 'STOP BOT'}
+
+            <div style="display: flex; flex-direction: column; gap: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+                
+                <!-- Group: Limits & Breaks -->
+                <div style="background: #f7f9f9; padding: 12px; border-radius: 12px; border: 1px solid #eff3f4;">
+                    <div style="font-size: 10px; font-weight: 800; color: #536471; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Session Control</div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <label style="font-size: 12px; color: #0f1419; font-weight: 500;">Follow Limit</label>
+                        <input type="number" id="inp-breakLimit" value="${config.breakFollowLimit}" style="width: 50px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 12px;">
+                    </div>
+
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <label style="font-size: 12px; color: #0f1419; font-weight: 500;">Break Duration (m)</label>
+                        <input type="number" id="inp-breakDur" value="${config.breakDuration}" style="width: 50px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 12px;">
+                    </div>
+
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <label style="font-size: 12px; color: #0f1419; font-weight: 500;">Per Profile Limit</label>
+                        <input type="number" id="inp-pLimit" value="${config.pLimit}" style="width: 50px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 12px;">
+                    </div>
+                </div>
+
+                <!-- Group: Targeting -->
+                <div style="background: #f7f9f9; padding: 12px; border-radius: 12px; border: 1px solid #eff3f4;">
+                    <div style="font-size: 10px; font-weight: 800; color: #536471; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Targeting Logic</div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <label style="font-size: 12px; color: #0f1419; font-weight: 500;">Minimum Ratio</label>
+                        <input type="number" step="0.1" id="inp-minRatio" value="${config.minRatio}" style="width: 50px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 12px;">
+                    </div>
+
+                    <div style="display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 8px; border-radius: 8px; border: 1px solid #eff3f4;">
+                        <label style="font-size: 12px; color: #0f1419; font-weight: 600; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                            <input type="checkbox" id="inp-useMinFers" ${config.useMinFollowers ? 'checked' : ''} style="accent-color: #1d9bf0; width: 14px; height: 14px;">
+                            Min Followers
+                        </label>
+                        <input type="number" id="inp-minFers" value="${config.minFollowers}" style="width: 60px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 12px; ${config.useMinFollowers ? '' : 'opacity: 0.4;'}" ${config.useMinFollowers ? '' : 'disabled'}>
+                    </div>
+                </div>
+
+                <!-- Group: Behavior -->
+                <div style="padding: 0 4px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <label style="font-size: 12px; color: #536471; font-weight: 500;">Delay Range (s)</label>
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <input type="number" id="inp-minD" value="${config.minDelay}" style="width: 60px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 11px;">
+                            <span style="color: #cfd9de;">-</span>
+                            <input type="number" id="inp-maxD" value="${config.maxDelay}" style="width: 60px; border: 1px solid #cfd9de; border-radius: 6px; padding: 4px; text-align: center; font-size: 11px;">
+                        </div>
+                    </div>
+
+                    <div style="margin-bottom: 10px;">
+                        <label style="font-size: 12px; color: #536471; font-weight: 500; display: block; margin-bottom: 4px;">Skip Handles</label>
+                        <textarea id="inp-skip" style="width: 100%; height: 45px; border: 1px solid #cfd9de; border-radius: 8px; padding: 8px; font-size: 11px; font-family: monospace; resize: none; box-sizing: border-box;">${config.skipList}</textarea>
+                    </div>
+
+                    <label style="font-size: 12px; color: #0f1419; font-weight: 500; display: flex; align-items: center; gap: 8px; cursor: pointer; margin-bottom: 15px;">
+                        <input type="checkbox" id="inp-owner" ${config.followProfileOwner ? 'checked' : ''} style="accent-color: #1d9bf0; width: 14px; height: 14px;">
+                        Follow Profile Owner
+                    </label>
+                </div>
+
+                <!-- Action Button -->
+                <button id="main-toggle-btn" style="width: 100%; padding: 12px; background: ${config.paused ? '#1d9bf0' : '#0f1419'}; color: #fff; border: none; border-radius: 25px; cursor: pointer; font-weight: 700; font-size: 14px; transition: background 0.2s ease; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    ${config.paused ? '▶ START BOT' : '⏸ STOP BOT'}
                 </button>
             </div>
         `;
 
+        // Listeners
+        panel.querySelector('#inp-breakLimit').onchange = (e) => { config.breakFollowLimit = parseInt(e.target.value); save(); };
+        panel.querySelector('#inp-breakDur').onchange = (e) => { config.breakDuration = parseInt(e.target.value); save(); };
         panel.querySelector('#inp-pLimit').onchange = (e) => { config.pLimit = parseInt(e.target.value); save(); };
-        panel.querySelector('#inp-hLimit').onchange = (e) => { config.hLimit = parseInt(e.target.value); save(); };
+        panel.querySelector('#inp-minRatio').onchange = (e) => { config.minRatio = parseFloat(e.target.value); save(); };
         panel.querySelector('#inp-minD').onchange = (e) => { config.minDelay = parseInt(e.target.value); save(); };
         panel.querySelector('#inp-maxD').onchange = (e) => { config.maxDelay = parseInt(e.target.value); save(); };
+        panel.querySelector('#inp-skip').onchange = (e) => { config.skipList = e.target.value; save(); };
         panel.querySelector('#inp-owner').onchange = (e) => { config.followProfileOwner = e.target.checked; save(); };
         
+        panel.querySelector('#inp-useMinFers').onchange = (e) => { 
+            config.useMinFollowers = e.target.checked; 
+            save(); renderPanel(); 
+        };
+        panel.querySelector('#inp-minFers').onchange = (e) => { config.minFollowers = parseInt(e.target.value); save(); };
+
         panel.querySelector('#main-toggle-btn').onclick = () => {
             config.paused = !config.paused;
-            // If user manually starts, clear any existing cooldown
-            if (!config.paused) state.cooldownUntil = 0; save();
-            updatePillStatus(config.paused ? "Bot Stopped" : "Starting...");
-            renderPanel();
-            if (!config.paused && !state.busy) scanFollow();
+            if (!config.paused) { state.cooldownUntil = 0; state.processedInCycle = 0; state.breakUntil = 0; }
+            save(); renderPanel(); if (!config.paused && !state.busy) scanFollow();
         };
     };
 
@@ -119,181 +367,145 @@
         if (stat) stat.innerText = msg;
     };
 
-    // --- RATE LIMIT CHECKER ---
-    async function checkRateLimit() {
-        await delay(1200); // Wait for potential toast to appear
-        const toast = document.querySelector('[data-testid="toast"]');
-        if (toast) {
-            const text = toast.textContent.toLowerCase();
-            if (text.includes('rate limited') || text.includes('unable to follow')) {
-                log('Limit detected! Pausing for 1 hour.');
-                state.cooldownUntil = Date.now() + (60 * 60 * 1000); // 1 hour
-                save();
-                return true;
-            }
-        }
-        return false;
-    }
-
-    // --- LOGIC UTILITIES ---
-    const delay = (ms) => new Promise(r => setTimeout(r, ms));
-
     const randomWait = async () => {
         const sec = Math.floor(Math.random() * (config.maxDelay - config.minDelay + 1)) + config.minDelay;
         for (let i = sec; i > 0; i--) {
-            if (config.paused || Date.now() < state.cooldownUntil) break;
-            updatePillStatus(`Wait: ${i}s | Follows: ${state.hCount}`);
+            if (config.paused || state.cooldownUntil > Date.now()) break;
+            updatePillStatus(`Wait: ${i}s | Session: ${state.sessionFollowCount}/${config.breakFollowLimit}`);
             await delay(1000);
         }
     };
 
-    const isAd = (tweet) => {
-        const spans = Array.from(tweet.querySelectorAll('span'));
-        return spans.some(s => s.textContent === 'Promoted' || s.textContent === 'Ad') || !!tweet.querySelector('[data-testid="placementTracking"]');
-    };
-
-    const getValidTweets = () => {
-        const cells = Array.from(document.querySelectorAll('div[data-testid="cellInnerDiv"]'));
-        return cells.map(c => c.querySelector('article[data-testid="tweet"]')).filter(t => t && !isAd(t));
-    };
-
-    const goBack = async () => {
-        const btn = document.querySelector('button[data-testid="app-bar-back"]');
-        if (btn) { btn.click(); await delay(2000); return true; }
-        return false;
-    };
-
-    // --- MAIN LOOP ---
+    /**
+     * --- MAIN LOOP ---
+     */
     async function scanFollow() {
         if (config.paused || state.busy) return;
         state.busy = true;
 
         try {
-            // 1. Check Cooldown / Rate Limit State
             if (state.cooldownUntil > Date.now()) {
                 const diff = state.cooldownUntil - Date.now();
-                const mins = Math.ceil(diff / 1000 / 60);
-                updatePillStatus(`Limit: Resuming in ${mins}m`);
-                state.busy = false;
-                setTimeout(scanFollow, 30000); // Re-check every 30 seconds
-                return;
+                updatePillStatus(`Limit: ${Math.ceil(diff/60000)}m left`);
+                state.busy = false; setTimeout(scanFollow, 10000); return;
+            }
+            if (state.breakUntil > Date.now()) {
+                const diff = state.breakUntil - Date.now();
+                updatePillStatus(`Break: ${Math.ceil(diff/1000)}s left`);
+                state.busy = false; setTimeout(scanFollow, 2000); return;
+            }
+            if (state.breakUntil !== 0 && state.breakUntil < Date.now()) {
+                state.breakUntil = 0; state.sessionFollowCount = 0; await refreshHome();
+            }
+            if (state.sessionFollowCount >= config.breakFollowLimit) {
+                state.breakUntil = Date.now() + (config.breakDuration * 60 * 1000);
+                state.busy = false; scanFollow(); return;
             }
 
-            // 2. Check Hourly Limit
-            if (state.hCount >= config.hLimit) {
-                updatePillStatus("Hourly Limit Reached");
-                config.paused = true;
-                renderPanel();
-                state.busy = false;
-                return;
-            }
-
-            // 3. Logic for Followers Page
-            if (window.location.pathname.includes('/verified_followers')) {
+            // 1. FOLLOWER LIST LOGIC
+            if (window.location.pathname.includes('/followers') || window.location.pathname.includes('/verified_followers')) {
                 const cells = Array.from(document.querySelectorAll('div[data-testid="cellInnerDiv"]'));
-                let followedInProfile = 0;
-
                 for (let cell of cells) {
-                    if (config.paused || followedInProfile >= config.pLimit || state.cooldownUntil > Date.now()) break;
+                    if (config.paused || state.processedInCycle >= config.pLimit || state.sessionFollowCount >= config.breakFollowLimit) break;
                     
                     const followBtn = cell.querySelector('button[data-testid*="-follow"]');
-                    const isFollowing = cell.querySelector('button[data-testid*="-unfollow"]');
-                    const isProtected = cell.querySelector('svg[aria-label="Protected account"]');
+                    const userLink = cell.querySelector('a[role="link"]');
+                    const handle = userLink?.href.split('/').pop();
 
-                    if (followBtn && !isFollowing && !isProtected) {
+                    if (followBtn && !cell.querySelector('button[data-testid*="-unfollow"]') && !shouldSkipHandle(handle)) {
+                        highlightElement(cell);
                         cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        await delay(500);
-                        followBtn.click();
+                        const stats = await getStatsFromHoverCard(userLink);
                         
-                        // Check for rate limit immediately after clicking
-                        if (await checkRateLimit()) break;
+                        if (stats) {
+                            injectStatsLabel(followBtn, stats);
+                            
+                            const ratioMatch = stats.ratio >= config.minRatio;
+                            const fersMatch = !config.useMinFollowers || stats.followers >= config.minFollowers;
 
-                        state.hCount++;
-                        followedInProfile++;
-                        await randomWait();
-                    }
-                }
-                
-                await goBack(); // Back to Profile
-                await delay(1000);
-                await goBack(); // Back to Home
-                state.tweetIndex++;
-            } 
-            
-            // 4. Logic for Homepage
-            else {
-                updatePillStatus("Scanning Feed...");
-                const tweets = getValidTweets();
-
-                if (state.tweetIndex >= tweets.length) {
-                    window.scrollBy(0, 800);
-                    await delay(2000);
-                    state.tweetIndex = 0;
-                } else {
-                    const tweet = tweets[state.tweetIndex];
-                    const handle = tweet.querySelector('div[data-testid="User-Name"] a')?.href.split('/').pop();
-
-                    if (handle === state.lastHandle) {
-                        state.tweetIndex++;
-                        state.busy = false;
-                        return scanFollow();
-                    }
-
-                    tweet.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    await delay(1000);
-
-                    const profileLink = tweet.querySelector('div[data-testid="User-Name"] a');
-                    if (profileLink) {
-                        state.lastHandle = handle;
-                        profileLink.click();
-                        await delay(2000);
-
-                        if (config.followProfileOwner) {
-                            const ownerFollow = document.querySelector('div[data-testid="placementTracking"] button[data-testid*="-follow"]');
-                            if (ownerFollow) {
-                                ownerFollow.click();
-                                if (await checkRateLimit()) { state.busy = false; return scanFollow(); }
+                            if (ratioMatch && fersMatch) {
+                                log(`Following @${handle} (Ratio: ${stats.ratio.toFixed(2)}, Fers: ${stats.followers})`);
+                                followBtn.click();
+                                if (await checkRateLimit()) break;
+                                state.hCount++; state.processedInCycle++; state.sessionFollowCount++;
                                 await randomWait();
+                            } else {
+                                log(`Skipping @${handle} - Conditions not met`);
+                                await delay(1000);
+                                continue; 
                             }
                         }
+                    }
+                    await delay(1000);
+                }
+                state.processedInCycle = 0;
+                await goBack(); await goBack(); state.tweetIndex++;
+            }
+            
+            // 2. PROFILE PAGE LOGIC
+            else if (document.querySelector('[data-testid="UserProfileHeader_Items"]')) {
+                const handle = window.location.pathname.split('/')[1];
+                if (shouldSkipHandle(handle)) { await goBack(); state.busy = false; return scanFollow(); }
 
-                        const followerBtn = document.querySelector('a[href*="/verified_followers"]');
-                        if (followerBtn) {
-                            followerBtn.click();
-                            await delay(2000);
-                        } else {
-                            await goBack();
-                            state.tweetIndex++;
+                if (config.followProfileOwner) {
+                    const followBtn = document.querySelector('button[data-testid$="-follow"]');
+                    if (followBtn && !document.querySelector('button[data-testid$="-unfollow"]')) {
+                        const follLink = document.querySelector('a[href$="/following"] span span');
+                        const fersLink = document.querySelector('a[href$="/followers"] span span') || document.querySelector('a[href$="/verified_followers"] span span');
+                        if (follLink && fersLink) {
+                            const fers = parseTwitterNumber(fersLink.innerText);
+                            const fing = parseTwitterNumber(follLink.innerText);
+                            const ratio = fing / (fers || 1);
+                            
+                            injectStatsLabel(followBtn, { ratio, followers: fers, following: fing });
+                            
+                            const ratioMatch = ratio >= config.minRatio;
+                            const fersMatch = !config.useMinFollowers || fers >= config.minFollowers;
+
+                            if (ratioMatch && fersMatch) { 
+                                followBtn.click(); state.sessionFollowCount++;
+                                if (!await checkRateLimit()) await randomWait();
+                            }
                         }
-                    } else {
-                        state.tweetIndex++;
                     }
                 }
+                const verifiedBtn = document.querySelector('a[href$="/verified_followers"]');
+                const standardBtn = document.querySelector('a[href$="/followers"]');
+                if (verifiedBtn || standardBtn) { (verifiedBtn || standardBtn).click(); await delay(2000); }
+                else { await goBack(); state.tweetIndex++; }
             }
-        } catch (e) {
-            log("Error: " + e.message);
-        }
+            
+            // 3. FEED LOGIC
+            else {
+                updatePillStatus("Scanning Feed...");
+                if (await checkNewPostsBanner()) { state.busy = false; setTimeout(scanFollow, 1000); return; }
+
+                const cells = Array.from(document.querySelectorAll('div[data-testid="cellInnerDiv"]'));
+                const tweets = cells.filter(c => c.querySelector('article[data-testid="tweet"]') && !isAd(c));
+
+                if (state.tweetIndex >= tweets.length) {
+                    window.scrollBy(0, 1000); await delay(2000); state.tweetIndex = 0;
+                } else {
+                    const cell = tweets[state.tweetIndex];
+                    highlightElement(cell);
+                    const profileLink = cell.querySelector('div[data-testid="User-Name"] a');
+                    const handle = profileLink?.href.split('/').pop();
+
+                    if (profileLink && !shouldSkipHandle(handle)) {
+                        cell.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        await delay(800);
+                        const stats = await getStatsFromHoverCard(profileLink);
+                        if (stats) {
+                            profileLink.click(); await delay(2000);
+                        } else { state.tweetIndex++; }
+                    } else { state.tweetIndex++; }
+                }
+            }
+        } catch (e) { log("Error: " + e.message); }
 
         state.busy = false;
         if (!config.paused) setTimeout(scanFollow, 1000);
     }
 
-    // --- LOCK & INIT ---
-    function acquireLock() {
-        const active = localStorage.getItem('xf_active_tab');
-        if (active && active !== state.tabId) return false;
-        localStorage.setItem('xf_active_tab', state.tabId);
-        return true;
-    }
-
-    window.onbeforeunload = () => localStorage.removeItem('xf_active_tab');
-
-    if (acquireLock()) {
-        setTimeout(() => {
-            setupUI();
-            log("Bot Ready");
-            if (!config.paused) scanFollow();
-        }, 2000);
-    }
-
+    setTimeout(() => { setupUI(); log("Bot Loaded V2.0.0"); }, 2500);
 })();
