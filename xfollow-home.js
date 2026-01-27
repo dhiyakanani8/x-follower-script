@@ -233,13 +233,13 @@
 
         label.innerHTML = `
             <div style="${badgeStyle(ratioPass, '#00ba7c')}">
-                <span>RATIO</span> <span>${stats.ratio.toFixed(2)}</span>
+                <span>Ratio &nbsp;</span> <span>${stats.ratio.toFixed(2)}</span>
             </div>
             <div style="${badgeStyle(followersPass, '#1d9bf0')}">
-                <span>Followers</span> <span>${formatTwitterNumber(stats.followers)}</span>
+                <span>Follower &nbsp;</span> <span>${formatTwitterNumber(stats.followers)}</span>
             </div>
             <div style="${badgeStyle(followersPass, '#536471')}">
-                <span>FOLLOWING</span> <span>${formatTwitterNumber(stats.following)}</span>
+                <span>Following &nbsp;</span> <span>${formatTwitterNumber(stats.following)}</span>
             </div>
         `;
 
