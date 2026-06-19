@@ -1,0 +1,286 @@
+// ==UserScript==
+// @name         Google Maps Article Scanner
+// @namespace    http://tampermonkey.net/
+// @version      1.0
+// @description  Scan role=article cards and export JSON/CSV
+// @match        *://*/*
+// @grant        GM_download
+// ==/UserScript==
+
+(function () {
+'use strict';
+
+let results = [];
+let current = 0;
+let running = false;
+let noNewCount = 0;
+let processed = new Set();
+
+// ===================
+// Panel
+// ===================
+// ===================
+// Modern Panel UI
+// ===================
+const panel = document.createElement("div");
+
+panel.style = `
+position:fixed;
+top:20px;
+right:20px;
+width:280px;
+background:#1e1e1e;
+color:#fff;
+z-index:99999999;
+padding:18px;
+border-radius:15px;
+box-shadow:0 10px 30px rgba(0,0,0,.4);
+font-family:Arial,sans-serif;
+`;
+
+panel.innerHTML = `
+<div style="text-align:center;margin-bottom:15px;">
+    <h2 style="margin:0;font-size:18px;">📍 Maps Scanner</h2>
+    <div id="statusBox"
+        style="
+        margin-top:8px;
+        background:#666;
+        color:white;
+        padding:8px;
+        border-radius:8px;
+        font-weight:bold;
+        ">
+        ⚪ Ready
+    </div>
+</div>
+
+<div id="progress"
+style="
+background:#2d2d2d;
+padding:10px;
+border-radius:10px;
+text-align:center;
+margin-bottom:15px;
+font-size:15px;
+">
+Ready
+</div>
+
+<div style="display:flex;gap:10px;margin-bottom:12px;">
+    <button id="startBtn"
+    style="
+    flex:1;
+    background:#28a745;
+    color:white;
+    border:none;
+    padding:12px;
+    border-radius:10px;
+    cursor:pointer;
+    font-size:15px;
+    font-weight:bold;">
+    ▶ Start
+    </button>
+
+    <button id="stopBtn"
+    style="
+    flex:1;
+    background:#dc3545;
+    color:white;
+    border:none;
+    padding:12px;
+    border-radius:10px;
+    cursor:pointer;
+    font-size:15px;
+    font-weight:bold;">
+    ⏸ Stop
+    </button>
+</div>
+
+<hr style="border-color:#444;">
+
+<div style="display:flex;gap:10px;">
+    <button id="jsonBtn"
+    style="
+    flex:1;
+    background:#007bff;
+    color:white;
+    border:none;
+    padding:12px;
+    border-radius:10px;
+    cursor:pointer;
+    font-size:14px;
+    font-weight:bold;">
+    ⬇ JSON
+    </button>
+
+    <button id="csvBtn"
+    style="
+    flex:1;
+    background:#ff9800;
+    color:white;
+    border:none;
+    padding:12px;
+    border-radius:10px;
+    cursor:pointer;
+    font-size:14px;
+    font-weight:bold;">
+    ⬇ CSV
+    </button>
+</div>
+
+<div style="
+margin-top:15px;
+text-align:center;
+font-size:12px;
+color:#aaa;">
+Total Records:
+<span id="totalCount">0</span>
+</div>
+`;
+
+document.body.appendChild(panel);
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function scan() {
+
+    while (running) {
+
+        let articles = [...document.querySelectorAll('[role="article"]')];
+
+        // reached bottom?
+        if (current >= articles.length) {
+
+            articles.at(-1)?.scrollIntoView({
+                behavior: "smooth",
+                block: "end"
+            });
+
+            await sleep(3000);
+
+            let newLength = document.querySelectorAll('[role="article"]').length;
+
+            if (newLength <= articles.length) {
+                noNewCount++;
+            } else {
+                noNewCount = 0;
+            }
+
+            if (noNewCount >= 5) {
+                running = false;
+                document.getElementById("progress").innerHTML =
+                    `Finished (${results.length})`;
+                break;
+            }
+
+            continue;
+        }
+
+        let article = articles[current];
+
+        article.scrollIntoView({
+            behavior: "smooth",
+            block: "center"
+        });
+
+        article.style.border = "5px solid red";
+        article.style.background = "#fff7c5";
+
+        document.getElementById("progress").innerHTML =
+            `${current + 1} / ${articles.length}`;
+
+        await sleep(1500);
+
+        let name = article.querySelector('.hfpxzc')?.getAttribute('aria-label') || "";
+
+        // prevent duplicates
+        if (!processed.has(name)) {
+
+            processed.add(name);
+
+            let sub = {
+                name: name,
+                title: article.querySelector('.qBF1Pd')?.innerText.trim() || "",
+                rating: article.querySelector('.AJB7ye')?.innerText.trim() || "",
+                reviews: article.querySelector('.UY7F9')?.innerText.trim() || "",
+                phone: article.querySelector('.UsdlK')?.innerText.trim() || "",
+                website: article.querySelector('a.lcr4fd.S9kvJb')?.href || "",
+                address: article.innerText.trim() || "",
+            };
+
+            results.push({
+                index: results.length + 1,
+                datetime: new Date().toLocaleString(),
+                url: location.href,
+                sub
+            });
+
+            console.log(sub);
+        }
+
+        article.style.border = "5px solid green";
+
+        current++;
+
+        await sleep(500);
+    }
+}
+
+// Start
+document.getElementById("startBtn").onclick = () => {
+    if (!running) {
+        running = true;
+        scan();
+    }
+};
+
+// Stop
+document.getElementById("stopBtn").onclick = () => {
+    running = false;
+};
+
+// JSON Download
+document.getElementById("jsonBtn").onclick = () => {
+
+    const blob = new Blob(
+        [JSON.stringify(results, null, 2)],
+        { type: "application/json" }
+    );
+
+    GM_download(
+        URL.createObjectURL(blob),
+        "google_maps_data.json"
+    );
+};
+
+// CSV Download
+document.getElementById("csvBtn").onclick = () => {
+
+    let csv =
+        "name,title,rating,reviews,phone,website,address\n";
+
+    results.forEach(r => {
+
+        csv += `"${r.sub.name.replace(/"/g,'""')}",` +
+            `"${r.sub.title.replace(/"/g,'""')}",` +
+            `"${r.sub.rating}",` +
+            `"${r.sub.reviews}",` +
+            `"${r.sub.phone}",` +
+            `"${r.sub.website}",` +
+            `"${r.sub.address.replace(/"/g,'""')}"\n`;
+
+    });
+
+    const blob = new Blob([csv], {
+        type: "text/csv"
+    });
+
+    GM_download(
+        URL.createObjectURL(blob),
+        "google_maps_data.csv"
+    );
+};
+
+})();
